@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Подземелья Тьмы — Roguelike</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0f; color: #c0c0c0; font-family: 'Courier New', monospace; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+#header { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; background: #111118; border-bottom: 1px solid #2a2a3a; flex-shrink: 0; }
+#header .stat { margin: 0 12px; font-size: 14px; }
+#header .stat b { color: #e0e0e0; }
+.hp-bar { display: inline-block; width: 120px; height: 10px; background: #333; border: 1px solid #555; border-radius: 3px; vertical-align: middle; }
+.hp-fill { height: 100%; background: #c33; border-radius: 2px; transition: width 0.3s; }
+.xp-bar { display: inline-block; width: 120px; height: 8px; background: #333; border: 1px solid #555; border-radius: 3px; vertical-align: middle; }
+.xp-fill { height: 100%; background: #3a8; border-radius: 2px; transition: width 0.3s; }
+#game { flex: 1; display: flex; justify-content: center; align-items: center; position: relative; }
+canvas { image-rendering: pixelated; }
+#log { height: 120px; overflow-y: auto; padding: 8px 16px; background: #0d0d14; border-top: 1px solid #2a2a3a; font-size: 12px; flex-shrink: 0; }
+#log div { margin: 2px 0; }
+.log-damage { color: #e44; }
+.log-heal { color: #4c8; }
+.log-info { color: #88a; }
+.log-loot { color: #da2; }
+.log-level { color: #f82; }
+.log-death { color: #f22; font-weight: bold; font-size: 14px; }
+#overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.85); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 10; }
+#overlay h1 { font-size: 36px; color: #e44; margin-bottom: 10px; }
+#overlay h2 { font-size: 28px; color: #da2; margin-bottom: 20px; }
+#overlay p { font-size: 14px; color: #aaa; margin: 4px 0; }
+#overlay .start-btn { margin-top: 20px; padding: 12px 32px; font-size: 18px; background: #c33; color: #fff; border: none; cursor: pointer; font-family: inherit; border-radius: 4px; }
+#overlay .start-btn:hover { background: #e44; }
+#minimap { position: absolute; top: 8px; right: 8px; border: 1px solid #333; background: #0a0a0f; }
+#inv { position: absolute; bottom: 8px; right: 8px; background: rgba(10,10,15,0.9); border: 1px solid #333; padding: 6px 10px; font-size: 11px; border-radius: 4px; }
+#inv div { margin: 2px 0; }
+</style>
+</head>
+<body>
+<div id="header">
+  <div>
+    <span class="stat">Уровень: <b id="s-level">1</b></span>
+    <span class="stat">HP: <b id="s-hp">20/20</b> <span class="hp-bar"><span class="hp-fill" id="hp-bar" style="width:100%"></span></span></span>
+    <span class="stat">XP: <b id="s-xp">0/20</b> <span class="xp-bar"><span class="xp-fill" id="xp-bar" style="width:0%"></span></span></span>
+    <span class="stat">Атака: <b id="s-atk">3</b></span>
+    <span class="stat">Защита: <b id="s-def">1</b></span>
+  </div>
+  <div>
+    <span class="stat">Этаж: <b id="s-floor">1</b></span>
+    <span class="stat">Золото: <b id="s-gold">0</b></span>
+    <span class="stat">Ключи: <b id="s-keys">0</b></span>
+  </div>
+</div>
+<div id="game">
+  <canvas id="canvas"></canvas>
+  <canvas id="minimap" width="140" height="140"></canvas>
+  <div id="inv"></div>
+  <div id="overlay">
+    <h1>Подземелья Тьмы</h1>
+    <p>WASD / Стрелки — движение</p>
+    <p>Пробел — атака / взаимодействие</p>
+    <p>Собирай зелья, убивай монстров, спускайся глубже</p>
+    <button class="start-btn" id="start-btn">Начать игру</button>
+  </div>
+</div>
+<div id="log"></div>
+
+<script>
+const TILE = 28;
+const MAP_W = 50;
+const MAP_H = 50;
+const MINIMAP_SCALE = 140 / Math.max(MAP_W, MAP_H);
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const minimapCanvas = document.getElementById('minimap');
+const mctx = minimapCanvas.getContext('2d');
+
+const T = { VOID: 0, FLOOR: 1, WALL: 2, DOOR: 3, STAIRS_DOWN: 4, CHEST: 5 };
+const COLORS = {
+  [T.VOID]: '#06060a',
+  [T.FLOOR]: '#1a1a24',
+  [T.WALL]: '#2a2a3a',
+  [T.DOOR]: '#8a6a30',
+  [T.STAIRS_DOWN]: '#2a6a9a',
+  [T.CHEST]: '#ba9a30',
+};
+
+const ENEMY_DEFS = [
+  { name: 'Крыса', ch: 'r', color: '#a87', hp: 5, atk: 1, def: 0, xp: 3, gold: 2 },
+  { name: 'Гоблин', ch: 'g', color: '#5a5', hp: 10, atk: 2, def: 1, xp: 6, gold: 5 },
+  { name: 'Скелет', ch: 's', color: '#ccc', hp: 15, atk: 3, def: 2, xp: 10, gold: 8 },
+  { name: 'Орк', ch: 'o', color: '#a55', hp: 25, atk: 5, def: 3, xp: 18, gold: 12 },
+  { name: 'Тёмный маг', ch: 'M', color: '#a3f', hp: 20, atk: 7, def: 1, xp: 25, gold: 20 },
+  { name: 'Дракон', ch: 'D', color: '#f42', hp: 60, atk: 10, def: 5, xp: 80, gold: 50 },
+];
+
+const ITEMS = [
+  { name: 'Зелье здоровья', type: 'heal', val: 10, color: '#e44', ch: '!' },
+  { name: 'Зелье силы', type: 'atk', val: 1, color: '#e82', ch: '!' },
+  { name: 'Зелье защиты', type: 'def', val: 1, color: '#48e', ch: '!' },
+  { name: 'Хлеб', type: 'heal', val: 5, color: '#ca8', ch: '%' },
+];
+
+let game = null;
+
+class Game {
+  constructor() {
+    this.floor = 1;
+    this.turn = 0;
+    this.map = [];
+    this.rooms = [];
+    this.enemies = [];
+    this.items = [];
+    this.effects = [];
+    this.player = { x: 0, y: 0, hp: 20, maxHp: 20, atk: 3, def: 1, level: 1, xp: 0, xpNext: 20, gold: 0, keys: 0, inventory: [] };
+    this.camera = { x: 0, y: 0 };
+    this.revealed = [];
+    this.explored = [];
+    this.animating = false;
+    this.generateFloor();
+    this.centerCamera();
+    this.revealAround();
+  }
+
+  generateFloor() {
+    this.map = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(T.VOID));
+    this.revealed = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(false));
+    this.explored = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(false));
+    this.rooms = [];
+    this.enemies = [];
+    this.items = [];
+
+    const numRooms = 8 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < numRooms * 4 && this.rooms.length < numRooms; i++) {
+      const w = 5 + Math.floor(Math.random() * 8);
+      const h = 5 + Math.floor(Math.random() * 7);
+      const x = 2 + Math.floor(Math.random() * (MAP_W - w - 4));
+      const y = 2 + Math.floor(Math.random() * (MAP_H - h - 4));
+      if (!this.rooms.some(r => x < r.x + r.w + 2 && x + w + 2 > r.x && y < r.y + r.h + 2 && y + h + 2 > r.y)) {
+        this.rooms.push({ x, y, w, h });
+      }
+    }
+
+    for (const room of this.rooms) {
+      for (let ry = room.y; ry < room.y + room.h; ry++) {
+        for (let rx = room.x; rx < room.x + room.w; rx++) {
+          this.map[ry][rx] = T.FLOOR;
+        }
+      }
+    }
+
+    for (let i = 1; i < this.rooms.length; i++) {
+      const a = this.rooms[i - 1];
+      const b = this.rooms[i];
+      const ax = Math.floor(a.x + a.w / 2);
+      const ay = Math.floor(a.y + a.h / 2);
+      const bx = Math.floor(b.x + b.w / 2);
+      const by = Math.floor(b.y + b.h / 2);
+      let cx = ax, cy = ay;
+      while (cx !== bx) { this.map[cy][cx] = T.FLOOR; cx += cx < bx ? 1 : -1; }
+      while (cy !== by) { this.map[cy][cx] = T.FLOOR; cy += cy < by ? 1 : -1; }
+    }
+
+    for (let y = 0; y < MAP_H; y++) {
+      for (let x = 0; x < MAP_W; x++) {
+        if (this.map[y][x] === T.FLOOR) {
+          let adjVoid = false;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+            const ny = y + dy, nx = x + dx;
+            if (ny >= 0 && ny < MAP_H && nx >= 0 && nx < MAP_W) { if (this.map[ny][nx] === T.VOID) adjVoid = true; }
+          }
+          if (adjVoid) this.map[y][x] = T.WALL;
+        }
+      }
+    }
+
+    for (const room of this.rooms) {
+      const wx = room.x - 1, wy = room.y - 1;
+      for (let dx = 0; dx <= room.w; dx++) {
+        if (wy >= 0 && wy < MAP_H && wx + dx >= 0 && wx + dx < MAP_W) if (this.map[wy][wx + dx] === T.VOID) this.map[wy][wx + dx] = T.WALL;
+        if (wy + room.h + 1 >= 0 && wy + room.h + 1 < MAP_H && wx + dx >= 0 && wx + dx < MAP_W) if (this.map[wy + room.h + 1][wx + dx] === T.VOID) this.map[wy + room.h + 1][wx + dx] = T.WALL;
+      }
+      for (let dy = 0; dy <= room.h; dy++) {
+        if (wy + dy >= 0 && wy + dy < MAP_H && wx >= 0 && wx < MAP_W) if (this.map[wy + dy][wx] === T.VOID) this.map[wy + dy][wx] = T.WALL;
+        if (wy + dy >= 0 && wy + dy < MAP_H && wx + room.w + 1 >= 0 && wx + room.w + 1 < MAP_W) if (this.map[wy + dy][wx + room.w + 1] === T.VOID) this.map[wy + dy][wx + room.w + 1] = T.WALL;
+      }
+    }
+
+    const spawnRoom = this.rooms[0];
+    this.player.x = Math.floor(spawnRoom.x + spawnRoom.w / 2);
+    this.player.y = Math.floor(spawnRoom.y + spawnRoom.h / 2);
+
+    const lastRoom = this.rooms[this.rooms.length - 1];
+    const sx = Math.floor(lastRoom.x + lastRoom.w / 2);
+    const sy = Math.floor(lastRoom.y + lastRoom.h / 2);
+    this.map[sy][sx] = T.STAIRS_DOWN;
+
+    const diff = Math.min(this.floor, 6);
+    const maxEnemyIdx = Math.min(diff, ENEMY_DEFS.length - 1);
+
+    for (let i = 1; i < this.rooms.length; i++) {
+      const room = this.rooms[i];
+      const numEnemies = Math.floor(Math.random() * (1 + Math.floor(diff / 2))) + 1;
+      for (let j = 0; j < numEnemies; j++) {
+        const ex = room.x + 1 + Math.floor(Math.random() * (room.w - 2));
+        const ey = room.y + 1 + Math.floor(Math.random() * (room.h - 2));
+        if (this.map[ey][ex] === T.FLOOR && !(ex === this.player.x && ey === this.player.y)) {
+          const defIdx = Math.floor(Math.random() * (maxEnemyIdx + 1));
+          const d = ENEMY_DEFS[defIdx];
+          const scale = 1 + (this.floor - 1) * 0.15;
+          this.enemies.push({ x: ex, y: ey, name: d.name, ch: d.ch, color: d.color, hp: Math.floor(d.hp * scale), maxHp: Math.floor(d.hp * scale), atk: Math.floor(d.atk * scale), def: Math.floor(d.def * scale), xp: Math.floor(d.xp * scale), gold: Math.floor(d.gold * scale) });
+        }
+      }
+    }
+
+    for (let i = 0; i < this.rooms.length; i++) {
+      const room = this.rooms[i];
+      if (Math.random() < 0.4) {
+        const ix = room.x + 1 + Math.floor(Math.random() * (room.w - 2));
+        const iy = room.y + 1 + Math.floor(Math.random() * (room.h - 2));
+        if (this.map[iy][ix] === T.FLOOR) {
+          const itemDef = ITEMS[Math.floor(Math.random() * ITEMS.length)];
+          this.items.push({ x: ix, y: iy, ...itemDef });
+        }
+      }
+      if (Math.random() < 0.25) {
+        const cx = room.x + 1 + Math.floor(Math.random() * (room.w - 2));
+        const cy = room.y + 1 + Math.floor(Math.random() * (room.h - 2));
+        if (this.map[cy][cx] === T.FLOOR) this.map[cy][cx] = T.CHEST;
+      }
+    }
+  }
+
+  revealAround() {
+    const r = 6;
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      if (dx * dx + dy * dy <= r * r) {
+        const nx = this.player.x + dx, ny = this.player.y + dy;
+        if (nx >= 0 && nx < MAP_W && ny >= 0 && ny < MAP_H) {
+          if (this.hasLineOfSight(this.player.x, this.player.y, nx, ny)) {
+            this.revealed[ny][nx] = true;
+            this.explored[ny][nx] = true;
+          }
+        }
+      }
+    }
+  }
+
+  hasLineOfSight(x0, y0, x1, y1) {
+    let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+    let sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    let err = dx - dy;
+    let x = x0, y = y0;
+    while (true) {
+      if (x === x1 && y === y1) return true;
+      if (this.map[y] && this.map[y][x] === T.WALL && !(x === x0 && y === y0)) return false;
+      let e2 = 2 * err;
+      if (e2 > -dy) { err -= dy; x += sx; }
+      if (e2 < dx) { err += dx; y += sy; }
+    }
+  }
+
+  centerCamera() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight - 160;
+    this.camera.x = this.player.x * TILE - canvas.width / 2 + TILE / 2;
+    this.camera.y = this.player.y * TILE - canvas.height / 2 + TILE / 2;
+  }
+
+  movePlayer(dx, dy) {
+    if (this.animating || this.player.hp <= 0) return;
+    const nx = this.player.x + dx, ny = this.player.y + dy;
+    if (nx < 0 || nx >= MAP_W || ny < 0 || ny >= MAP_H) return;
+    if (this.map[ny][nx] === T.WALL || this.map[ny][nx] === T.VOID) return;
+
+    const enemy = this.enemies.find(e => e.x === nx && e.y === ny);
+    if (enemy) { this.attackEnemy(enemy); this.afterTurn(); return; }
+
+    this.player.x = nx;
+    this.player.y = ny;
+    this.revealAround();
+
+    const itemIdx = this.items.findIndex(it => it.x === nx && it.y === ny);
+    if (itemIdx >= 0) this.pickupItem(itemIdx);
+
+    if (this.map[ny][nx] === T.STAIRS_DOWN) {
+      log('Нажми пробел, чтобы спуститься...', 'info');
+    }
+
+    if (this.map[ny][nx] === T.CHEST) {
+      this.openChest(nx, ny);
+    }
+
+    this.afterTurn();
+  }
+
+  attack() {
+    if (this.animating || this.player.hp <= 0) return;
+    const dirs = [[0,-1],[0,1],[-1,0],[1,0]];
+    let attacked = false;
+    for (const [dx, dy] of dirs) {
+      const e = this.enemies.find(en => en.x === this.player.x + dx && en.y === this.player.y + dy);
+      if (e) { this.attackEnemy(e); attacked = true; break; }
+    }
+    if (!attacked) {
+      if (this.map[this.player.y][this.player.x] === T.STAIRS_DOWN) {
+        this.floor++;
+        log(`Вы спускаетесь на этаж ${this.floor}...`, 'info');
+        this.generateFloor();
+        this.centerCamera();
+        this.revealAround();
+        return;
+      }
+    }
+    this.afterTurn();
+  }
+
+  attackEnemy(enemy) {
+    const dmg = Math.max(1, this.player.atk - enemy.def + Math.floor(Math.random() * 3) - 1);
+    enemy.hp -= dmg;
+    this.effects.push({ x: enemy.x, y: enemy.y, text: `-${dmg}`, color: '#f44', time: 30 });
+    log(`Вы наносите ${enemy.name} ${dmg} урона`, 'damage');
+    if (enemy.hp <= 0) {
+      log(`${enemy.name} повержен! (+${enemy.xp}xp, +${enemy.gold}г)`, 'loot');
+      this.player.xp += enemy.xp;
+      this.player.gold += enemy.gold;
+      this.enemies = this.enemies.filter(e => e !== enemy);
+      this.checkLevelUp();
+    }
+  }
+
+  enemyTurn() {
+    for (const e of this.enemies) {
+      const dx = this.player.x - e.x;
+      const dy = this.player.y - e.y;
+      const dist = Math.abs(dx) + Math.abs(dy);
+      if (dist <= 1) {
+        const dmg = Math.max(1, e.atk - this.player.def + Math.floor(Math.random() * 3) - 1);
+        this.player.hp -= dmg;
+        this.effects.push({ x: this.player.x, y: this.player.y, text: `-${dmg}`, color: '#f82', time: 30 });
+        log(`${e.name} атакует вас на ${dmg} урона`, 'damage');
+        if (this.player.hp <= 0) { this.player.hp = 0; log('Вы погибли! Нажмите любую клавишу...', 'death'); }
+      } else if (dist <= 8 && Math.random() < 0.6) {
+        const mx = dx !== 0 ? Math.sign(dx) : 0;
+        const my = dy !== 0 ? Math.sign(dy) : 0;
+        const nx = e.x + mx, ny = e.y + my;
+        if (nx >= 0 && nx < MAP_W && ny >= 0 && ny < MAP_H && this.map[ny][nx] === T.FLOOR && !this.enemies.some(o => o !== e && o.x === nx && o.y === ny) && !(nx === this.player.x && ny === this.player.y)) {
+          e.x = nx; e.y = ny;
+        }
+      }
+    }
+  }
+
+  afterTurn() {
+    this.turn++;
+    this.enemyTurn();
+    this.centerCamera();
+    this.updateUI();
+  }
+
+  checkLevelUp() {
+    while (this.player.xp >= this.player.xpNext) {
+      this.player.xp -= this.player.xpNext;
+      this.player.level++;
+      this.player.xpNext = Math.floor(this.player.xpNext * 1.5);
+      this.player.maxHp += 5;
+      this.player.hp = Math.min(this.player.hp + 10, this.player.maxHp);
+      this.player.atk += 1;
+      this.player.def += 1;
+      log(`Уровень ${this.player.level}! HP +5, Атака +1, Защита +1`, 'level');
+      this.effects.push({ x: this.player.x, y: this.player.y, text: 'LEVEL UP!', color: '#f82', time: 40 });
+    }
+  }
+
+  pickupItem(idx) {
+    const item = this.items[idx];
+    this.items.splice(idx, 1);
+    if (item.type === 'heal') {
+      const healed = Math.min(item.val, this.player.maxHp - this.player.hp);
+      this.player.hp += healed;
+      log(`Вы подобрали ${item.name} (+${healed} HP)`, 'heal');
+    } else if (item.type === 'atk') {
+      this.player.atk += item.val;
+      log(`Вы подобрали ${item.name} (+${item.val} Атака)`, 'loot');
+    } else if (item.type === 'def') {
+      this.player.def += item.val;
+      log(`Вы подобрали ${item.name} (+${item.val} Защита)`, 'loot');
+    }
+  }
+
+  openChest(x, y) {
+    this.map[y][x] = T.FLOOR;
+    const r = Math.random();
+    if (r < 0.3) {
+      const gold = 5 + Math.floor(Math.random() * 15 * this.floor);
+      this.player.gold += gold;
+      log(`В сундуке ${gold} золота!`, 'loot');
+    } else if (r < 0.55) {
+      const itemDef = ITEMS[Math.floor(Math.random() * ITEMS.length)];
+      this.items.push({ x, y, ...itemDef });
+      log(`В сундуке ${itemDef.name}!`, 'loot');
+    } else if (r < 0.75) {
+      this.player.atk += 1;
+      log('В сундуке Меч! (+1 Атака)', 'loot');
+    } else if (r < 0.9) {
+      this.player.def += 1;
+      log('В сундуке Щит! (+1 Защита)', 'loot');
+    } else {
+      const heal = 15;
+      this.player.hp = Math.min(this.player.hp + heal, this.player.maxHp);
+      log(`В сундуке Эликсир! (+${heal} HP)`, 'heal');
+    }
+  }
+
+  updateUI() {
+    const p = this.player;
+    document.getElementById('s-level').textContent = p.level;
+    document.getElementById('s-hp').textContent = `${p.hp}/${p.maxHp}`;
+    document.getElementById('hp-bar').style.width = `${(p.hp / p.maxHp) * 100}%`;
+    document.getElementById('s-xp').textContent = `${p.xp}/${p.xpNext}`;
+    document.getElementById('xp-bar').style.width = `${(p.xp / p.xpNext) * 100}%`;
+    document.getElementById('s-atk').textContent = p.atk;
+    document.getElementById('s-def').textContent = p.def;
+    document.getElementById('s-floor').textContent = this.floor;
+    document.getElementById('s-gold').textContent = p.gold;
+    document.getElementById('s-keys').textContent = p.keys;
+  }
+}
+
+function log(msg, type = 'info') {
+  const logDiv = document.getElementById('log');
+  const d = document.createElement('div');
+  d.className = `log-${type}`;
+  d.textContent = msg;
+  logDiv.appendChild(d);
+  logDiv.scrollTop = logDiv.scrollHeight;
+}
+
+function render() {
+  if (!game) { requestAnimationFrame(render); return; }
+  ctx.fillStyle = COLORS[T.VOID];
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const startTX = Math.floor(game.camera.x / TILE) - 1;
+  const startTY = Math.floor(game.camera.y / TILE) - 1;
+  const endTX = startTX + Math.ceil(canvas.width / TILE) + 3;
+  const endTY = startTY + Math.ceil(canvas.height / TILE) + 3;
+
+  for (let ty = startTY; ty < endTY; ty++) {
+    for (let tx = startTX; tx < endTX; tx++) {
+      if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= MAP_H) continue;
+      if (!game.explored[ty][tx]) continue;
+      const sx = tx * TILE - game.camera.x;
+      const sy = ty * TILE - game.camera.y;
+      const tile = game.map[ty][tx];
+      const visible = game.revealed[ty][tx];
+      ctx.fillStyle = visible ? COLORS[tile] : '#0e0e14';
+      ctx.fillRect(sx, sy, TILE, TILE);
+      if (tile === T.WALL && visible) {
+        ctx.strokeStyle = '#3a3a4a';
+        ctx.strokeRect(sx + 0.5, sy + 0.5, TILE - 1, TILE - 1);
+      }
+      if (tile === T.STAIRS_DOWN && visible) {
+        ctx.fillStyle = '#2a6a9a';
+        ctx.fillRect(sx + 4, sy + 4, TILE - 8, TILE - 8);
+        ctx.fillStyle = '#fff';
+        ctx.font = '16px Courier New';
+        ctx.textAlign = 'center';
+        ctx.fillText('>', sx + TILE / 2, sy + TILE / 2 + 6);
+      }
+      if (tile === T.CHEST && visible) {
+        ctx.fillStyle = '#ba9a30';
+        ctx.fillRect(sx + 6, sy + 8, TILE - 12, TILE - 14);
+        ctx.fillStyle = '#da2';
+        ctx.fillRect(sx + 8, sy + 6, TILE - 16, 4);
+      }
+    }
+  }
+
+  if (game) {
+    for (const item of game.items) {
+      if (!game.revealed[item.y][item.x]) continue;
+      const sx = item.x * TILE - game.camera.x;
+      const sy = item.y * TILE - game.camera.y;
+      ctx.fillStyle = item.color;
+      ctx.font = 'bold 18px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillText(item.ch, sx + TILE / 2, sy + TILE / 2 + 6);
+    }
+
+    for (const e of game.enemies) {
+      if (!game.revealed[e.y][e.x]) continue;
+      const sx = e.x * TILE - game.camera.x;
+      const sy = e.y * TILE - game.camera.y;
+      ctx.fillStyle = e.color;
+      ctx.font = 'bold 20px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillText(e.ch, sx + TILE / 2, sy + TILE / 2 + 7);
+      if (e.hp < e.maxHp) {
+        const bw = TILE - 4;
+        ctx.fillStyle = '#400';
+        ctx.fillRect(sx + 2, sy - 2, bw, 3);
+        ctx.fillStyle = '#e44';
+        ctx.fillRect(sx + 2, sy - 2, bw * (e.hp / e.maxHp), 3);
+      }
+    }
+
+    const psx = game.player.x * TILE - game.camera.x;
+    const psy = game.player.y * TILE - game.camera.y;
+    ctx.fillStyle = '#4df';
+    ctx.font = 'bold 22px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText('@', psx + TILE / 2, psy + TILE / 2 + 7);
+
+    for (let i = game.effects.length - 1; i >= 0; i--) {
+      const fx = game.effects[i];
+      const sx = fx.x * TILE - game.camera.x + TILE / 2;
+      const sy = fx.y * TILE - game.camera.y - (30 - fx.time) * 0.8;
+      ctx.fillStyle = fx.color;
+      ctx.font = 'bold 14px Courier New';
+      ctx.textAlign = 'center';
+      ctx.globalAlpha = fx.time / 30;
+      ctx.fillText(fx.text, sx, sy);
+      ctx.globalAlpha = 1;
+      fx.time--;
+      if (fx.time <= 0) game.effects.splice(i, 1);
+    }
+  }
+
+  renderMinimap();
+  requestAnimationFrame(render);
+}
+
+function renderMinimap() {
+  if (!game) return;
+  mctx.fillStyle = '#06060a';
+  mctx.fillRect(0, 0, 140, 140);
+  for (let y = 0; y < MAP_H; y++) {
+    for (let x = 0; x < MAP_W; x++) {
+      if (!game.explored[y][x]) continue;
+      const tile = game.map[y][x];
+      if (tile === T.FLOOR || tile === T.CHEST) mctx.fillStyle = '#2a2a3a';
+      else if (tile === T.WALL) mctx.fillStyle = '#444';
+      else if (tile === T.STAIRS_DOWN) mctx.fillStyle = '#2a6a9a';
+      else if (tile === T.DOOR) mctx.fillStyle = '#8a6a30';
+      else continue;
+      mctx.fillRect(x * MINIMAP_SCALE, y * MINIMAP_SCALE, Math.ceil(MINIMAP_SCALE), Math.ceil(MINIMAP_SCALE));
+    }
+  }
+  for (const e of game.enemies) {
+    if (!game.revealed[e.y][e.x]) continue;
+    mctx.fillStyle = '#f44';
+    mctx.fillRect(e.x * MINIMAP_SCALE, e.y * MINIMAP_SCALE, 2, 2);
+  }
+  mctx.fillStyle = '#4df';
+  mctx.fillRect(game.player.x * MINIMAP_SCALE - 1, game.player.y * MINIMAP_SCALE - 1, 3, 3);
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!game) return;
+  if (game.player.hp <= 0) {
+    game = null;
+    document.getElementById('log').innerHTML = '';
+    document.getElementById('overlay').style.display = 'flex';
+    document.getElementById('overlay').querySelector('h1').textContent = 'Вы погибли!';
+    document.getElementById('overlay').querySelector('h2') || (() => { const h = document.createElement('h2'); h.textContent = 'Попробуйте снова'; document.getElementById('overlay').querySelector('h1').after(h); })();
+    document.getElementById('overlay').querySelectorAll('p').forEach(p => p.remove());
+    const btn = document.getElementById('start-btn');
+    btn.textContent = 'Начать заново';
+    return;
+  }
+  const key = e.key.toLowerCase();
+  if (key === 'w' || key === 'ц' || key === 'arrowup') game.movePlayer(0, -1);
+  else if (key === 's' || key === 'ы' || key === 'arrowdown') game.movePlayer(0, 1);
+  else if (key === 'a' || key === 'ф' || key === 'arrowleft') game.movePlayer(-1, 0);
+  else if (key === 'd' || key === 'в' || key === 'arrowright') game.movePlayer(1, 0);
+  else if (key === ' ') { e.preventDefault(); game.attack(); }
+});
+
+document.getElementById('start-btn').addEventListener('click', () => {
+  document.getElementById('overlay').style.display = 'none';
+  document.getElementById('log').innerHTML = '';
+  game = new Game();
+  game.updateUI();
+  log('Добро пожаловать в Подземелья Тьмы!', 'info');
+  log('Исследуйте подземелье, собирайте добычу.', 'info');
+});
+
+window.addEventListener('resize', () => { if (game) game.centerCamera(); });
+render();
+</script>
+</body>
+</html>
